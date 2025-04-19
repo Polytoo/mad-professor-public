@@ -26,6 +26,9 @@ class VoiceInputThread(QThread):
         self.init_in_progress = False       # 是否正在初始化
         self.abort_current_init = False     # 是否中止当前初始化（用于设备切换）
         self.pending_device_change = None   # 待处理的设备变更
+        self.max_retry_count = 3            # 最大重试次数
+        self.retry_count = 0                # 当前重试次数
+        self.initialization_failed = False  # 初始化是否已失败
         
         # 互斥锁，保护多线程访问
         self.mutex = QMutex()
@@ -43,11 +46,13 @@ class VoiceInputThread(QThread):
                         self.pending_device_change = None
                         self.need_init = True
                         self.abort_current_init = True
+                        self.retry_count = 0  # 重置重试计数
+                        self.initialization_failed = False  # 重置初始化失败标志
                         if self.init_in_progress:
                             print("检测到设备切换请求，中止当前初始化")
                 
                 # 检查是否需要初始化录音器
-                if self.need_init and not self.init_in_progress:
+                if self.need_init and not self.init_in_progress and not self.initialization_failed:
                     with QMutexLocker(self.mutex):
                         self.init_in_progress = True
                         self.abort_current_init = False
@@ -131,7 +136,7 @@ class VoiceInputThread(QThread):
                 return
                 
             with QMutexLocker(self.mutex):
-                # 创建新录音器
+                # 创建新录音器，移除不支持的参数
                 self.recorder = AudioToTextRecorder(
                     spinner=False,
                     model='large-v2',
@@ -151,6 +156,8 @@ class VoiceInputThread(QThread):
             
             print("录音器初始化成功")
             success = True
+            self.retry_count = 0  # 重置重试计数
+            self.initialization_failed = False
             
         except Exception as e:
             print(f"初始化录音器失败: {str(e)}")
@@ -163,6 +170,16 @@ class VoiceInputThread(QThread):
             
             if should_abort:
                 print("初始化错误处理被中止")
+                return
+                
+            # 增加重试计数
+            self.retry_count += 1
+            
+            # 如果超过最大重试次数，停止重试
+            if self.retry_count >= self.max_retry_count:
+                print(f"录音设备初始化失败，已达到最大重试次数 ({self.max_retry_count})，停止重试")
+                self.initialization_failed = True  # 标记初始化失败
+                self.initialization_complete.emit(False)
                 return
                 
             # 尝试恢复到上一个工作设备
